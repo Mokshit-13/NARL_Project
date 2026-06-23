@@ -14,7 +14,7 @@ cols = [
 ]
 
 df = pd.read_csv(
-    "NARL_3_5_2022.txt",
+    "data/NARL_4_5_2022.txt",
     sep=r"\s+",
     names=cols,
     skiprows=1,
