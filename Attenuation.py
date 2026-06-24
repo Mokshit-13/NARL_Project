@@ -2,12 +2,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from pathlib import Path
+import mplcursors
 
 # ==========================================================
 # INPUT FILE
 # ==========================================================
 
-file_path = "data/NARL_3_5_2022.txt"
+file_path = "data/NARL_11_5_2022.txt"
 
 # ==========================================================
 # EXTRACT DATE AUTOMATICALLY
@@ -68,7 +69,6 @@ for ch in channels:
     )
 
 df = df.dropna()
-
 # ==========================================================
 # REFERENCE = TOP 5% MEAN
 # ==========================================================
@@ -91,12 +91,25 @@ for ch in channels:
         strongest_samples.mean()
     )
 
+    print(f"\n{ch}")
+
+    print(
+        "Top 5 Values :",
+        strongest_samples
+        .nlargest(5)
+        .tolist()
+    )
+
+    print(
+        f"Reference (Mean of Top 5) : "
+        f"{references[ch]:.3f}"
+    )
 # ==========================================================
 # DISPLAY REFERENCE LEVELS
 # ==========================================================
 
 print("\n========================================")
-print("Reference Levels (Top 5% Mean)")
+print("Reference Levels (Top-5 Mean)")
 print("========================================")
 
 for ch in channels:
@@ -178,6 +191,7 @@ print("\n========================================")
 print("Per-Minute Attenuation File Saved")
 print("========================================")
 print(output_file)
+
 # ==========================================================
 # MAXIMUM ATTENUATION
 # ==========================================================
@@ -309,15 +323,49 @@ for axes in ax.flat:
         axis='x',
         rotation=45
     )
+
+# ==========================================================
+# FORCE Y-AXIS TO START FROM 0 dB
+# ==========================================================
+
+for axes in ax.flat:
+
+    ymax = axes.get_ylim()[1]
+
+    axes.set_ylim(
+        0,
+        ymax
+    )
+
 # ==========================================================
 # OVERALL TITLE
 # ==========================================================
 
 plt.suptitle(
-    f'DRSP Rain Attenuation({date_str})',
+    f'DRSP Rain Attenuation ({date_str})',
     fontsize=16
 )
 
 plt.tight_layout()
+
+# ==========================================================
+# DATA CURSOR (MATLAB-LIKE)
+# ==========================================================
+
+cursor = mplcursors.cursor(
+    hover=True
+)
+
+@cursor.connect("add")
+def on_add(sel):
+
+    x = mdates.num2date(sel.target[0])
+
+    y = sel.target[1]
+
+    sel.annotation.set_text(
+        f"Time: {x.strftime('%H:%M:%S')}\n"
+        f"Att: {y:.2f} dB"
+    )
 
 plt.show()
