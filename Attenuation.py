@@ -8,7 +8,7 @@ import mplcursors
 # INPUT FILE
 # ==========================================================
 
-file_path = "data/NARL_11_5_2022.txt"
+file_path = "data/NARL_14_5_2022.txt"
 
 # ==========================================================
 # EXTRACT DATE AUTOMATICALLY
@@ -325,18 +325,15 @@ for axes in ax.flat:
     )
 
 # ==========================================================
-# FORCE Y-AXIS TO START FROM 0 dB
+# FIXED Y-AXIS RANGE FOR ALL ATTENUATION PLOTS
 # ==========================================================
 
 for axes in ax.flat:
 
-    ymax = axes.get_ylim()[1]
-
     axes.set_ylim(
         0,
-        ymax
+        25
     )
-
 # ==========================================================
 # OVERALL TITLE
 # ==========================================================
