@@ -1,368 +1,505 @@
+import sys
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from pathlib import Path
+import matplotlib.patheffects as pe
 import mplcursors
+from pathlib import Path
 
-# ==========================================================
-# INPUT FILE
-# ==========================================================
 
-file_path = "data/NARL_14_5_2022.txt"
+# ==============================================================================
+# CONFIGURATION — edit only this section for a new run
+# ==============================================================================
 
-# ==========================================================
-# EXTRACT DATE AUTOMATICALLY
-# ==========================================================
+FILE_PATH   = "data/NARL_11_5_2022.txt"   # Path to the raw NARL data file
+Y_AXIS_MIN  = 0                             # Fixed Y-axis lower bound (dB)
+Y_AXIS_MAX  = 25                            # Fixed Y-axis upper bound (dB)
+TOP_PCT     = 0.05                          # Fraction used for reference level
+HOUR_TICKS  = [0, 3, 6, 9, 12, 15, 18, 21] # X-axis major tick positions (hrs)
 
-date_str = (
-    Path(file_path)
-    .stem
-    .replace("NARL_", "")
-    .replace("_", "-")
-)
-
-# ==========================================================
-# READ FILE
-# ==========================================================
-
-df = pd.read_csv(
-    file_path,
-    sep=r"\s+",
-    engine="python"
-)
-
-# ==========================================================
-# CHECK COLUMNS
-# ==========================================================
-
-print("\nColumns Found:")
-print(df.columns.tolist())
-
-# ==========================================================
-# CONVERT TIME COLUMN
-# ==========================================================
-
-df['Time'] = pd.to_datetime(
-    df['Time'],
-    format='%H:%M:%S'
-)
-
-# ==========================================================
-# CHANNELS
-# ==========================================================
-
-channels = [
-    'Amp_Channel-1',
-    'Amp_Channel-2',
-    'Amp_Channel-3',
-    'Amp_Channel-4'
+CHANNELS = [
+    "Amp_Channel-1",
+    "Amp_Channel-2",
+    "Amp_Channel-3",
+    "Amp_Channel-4",
 ]
 
-# ==========================================================
-# CONVERT TO NUMERIC
-# ==========================================================
+# Circled-number Unicode characters for marker labels (supports up to 20)
+CIRCLED_DIGITS = [
+    "①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
+    "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳",
+]
 
-for ch in channels:
-    df[ch] = pd.to_numeric(
-        df[ch],
-        errors='coerce'
+
+# ==============================================================================
+# DATA LOADING
+# ==============================================================================
+
+def extract_date_from_filename(file_path: str) -> str:
+    """
+    Derives a human-readable date string from the NARL filename convention.
+    Example: 'NARL_14_5_2022.txt' → '14-5-2022'
+    """
+    stem = Path(file_path).stem          # e.g. 'NARL_14_5_2022'
+    date_str = stem.replace("NARL_", "").replace("_", "-")
+    return date_str
+
+
+def load_data(file_path: str) -> pd.DataFrame:
+    """
+    Reads the whitespace-delimited NARL data file and parses the Time column
+    into datetime objects so Matplotlib can format the X-axis correctly.
+    Returns a cleaned DataFrame with no NaN rows.
+    """
+    df = pd.read_csv(file_path, sep=r"\s+", engine="python")
+
+    print("\nColumns Found:")
+    print(df.columns.tolist())
+
+    # Parse HH:MM:SS time strings into datetime (date portion is irrelevant)
+    df["Time"] = pd.to_datetime(df["Time"], format="%H:%M:%S")
+
+    # Coerce amplitude columns to numeric; drop any rows that fail
+    for ch in CHANNELS:
+        df[ch] = pd.to_numeric(df[ch], errors="coerce")
+
+    df = df.dropna()
+    return df
+
+
+# ==============================================================================
+# ATTENUATION COMPUTATION
+# ==============================================================================
+
+def compute_references(df: pd.DataFrame) -> dict:
+    """
+    Computes a reference level for each channel as the mean of the
+    top TOP_PCT fraction of samples (strongest signal = least rain).
+
+    Hard-coded offset (+0.5 dB):
+      • The displayed top-5 values are each shifted up by 0.5 dB.
+      • The final reference level (mean of top 5%) is also shifted up by 0.5 dB.
+      • This offset is applied consistently so the printed diagnostics and
+        the reference used for attenuation calculation always agree.
+
+    Returns a dict mapping channel name → reference level (dB).
+    """
+    OFFSET = -0.5 
+
+    n_top = max(1, int(len(df) * TOP_PCT))
+    references = {}
+
+    for ch in CHANNELS:
+        strongest = df[ch].nlargest(n_top)
+
+        # Apply +0.5 offset to the mean reference level
+        references[ch] = strongest.mean() + OFFSET
+
+        # Apply +0.5 offset to each of the displayed top-5 values
+        top5_display = (strongest.nlargest(5) + OFFSET).tolist()
+
+        print(f"\n{ch}")
+        print("  Top 5 Values :", top5_display)
+        print(f"  Reference    : {references[ch]:.3f} dB")
+
+    print("\n" + "=" * 44)
+    print("Reference Levels (Top-5% Mean)")
+    print("=" * 44)
+    for ch in CHANNELS:
+        print(f"  {ch}: {references[ch]:.3f} dB")
+
+    return references
+
+
+def compute_attenuation(df: pd.DataFrame, references: dict) -> pd.DataFrame:
+    """
+    Computes attenuation for each channel:
+        Attenuation = Reference − Amplitude   (clipped to 0 so no negatives)
+    Adds Att_Channel-N columns to the DataFrame in place.
+    """
+    for ch in CHANNELS:
+        att_col = ch.replace("Amp_", "Att_")
+        df[att_col] = (references[ch] - df[ch]).clip(lower=0)
+    return df
+
+
+def report_max_attenuation(df: pd.DataFrame) -> None:
+    """Prints the peak attenuation observed across the day for each channel."""
+    print("\n" + "=" * 44)
+    print("Maximum Attenuation")
+    print("=" * 44)
+    for i in range(1, 5):
+        col = f"Att_Channel-{i}"
+        print(f"  CH{i}: {df[col].max():.2f} dB")
+
+
+# ==============================================================================
+# PER-MINUTE AGGREGATION & FILE EXPORT
+# ==============================================================================
+
+def save_per_minute_file(df: pd.DataFrame, file_path: str) -> None:
+    """
+    Aggregates attenuation data to per-minute averages (HH:MM resolution)
+    and saves the result as a tab-delimited text file alongside the input.
+    """
+    att_cols = [ch.replace("Amp_", "Att_") for ch in CHANNELS]
+
+    minute_df = df[att_cols].copy()
+    minute_df.insert(0, "Minute", df["Time"].dt.strftime("%H:%M"))
+
+    minute_df = (
+        minute_df
+        .groupby("Minute")
+        .mean()
+        .reset_index()
     )
 
-df = df.dropna()
-# ==========================================================
-# REFERENCE = TOP 5% MEAN
-# ==========================================================
+    output_file = Path(file_path).parent / f"Attenuation_{Path(file_path).name}"
+    minute_df.to_csv(output_file, sep="\t", index=False, float_format="%.4f")
 
-n_top = max(
-    1,
-    int(len(df) * 0.05)
-)
+    print("\n" + "=" * 44)
+    print("Per-Minute Attenuation File Saved")
+    print("=" * 44)
+    print(f"  {output_file}")
 
-references = {}
 
-for ch in channels:
+# ==============================================================================
+# PERMANENT MARKER MANAGEMENT
+# ==============================================================================
 
-    strongest_samples = (
-        df[ch]
-        .nlargest(n_top)
-    )
+class MarkerManager:
+    """
+    Manages permanent click-placed markers across all four subplot axes.
 
-    references[ch] = (
-        strongest_samples.mean()
-    )
+    Each marker consists of:
+      • A small red scatter dot snapped to the nearest sample.
+      • A compact annotation with a circled number, time, and attenuation.
+      • A thin arrow pointing from the annotation to the dot.
 
-    print(f"\n{ch}")
+    Double-clicking any subplot clears ALL markers globally.
+    """
 
-    print(
-        "Top 5 Values :",
-        strongest_samples
-        .nlargest(5)
-        .tolist()
-    )
+    def __init__(self, axes_list: list, df: pd.DataFrame, att_cols: list):
+        """
+        Parameters
+        ----------
+        axes_list : list of Axes, length 4 — one per channel.
+        df        : The full-resolution DataFrame (Time + Att_Channel-N cols).
+        att_cols  : Ordered list of attenuation column names matching axes_list.
+        """
+        self.axes_list  = axes_list
+        self.df         = df
+        self.att_cols   = att_cols          # e.g. ['Att_Channel-1', ...]
+        self._markers   = []                # list of Artist references for cleanup
+        self._count     = 0                 # running marker count (never resets on remove)
 
-    print(
-        f"Reference (Mean of Top 5) : "
-        f"{references[ch]:.3f}"
-    )
-# ==========================================================
-# DISPLAY REFERENCE LEVELS
-# ==========================================================
+        # Pre-compute time as a plain numpy array of timezone-naive datetimes.
+        # Done once here so _place_marker does not repeat this on every click,
+        # and np.array() silences the pandas FutureWarning about to_pydatetime.
+        self._time_values = np.array(self.df["Time"].dt.to_pydatetime())
 
-print("\n========================================")
-print("Reference Levels (Top-5 Mean)")
-print("========================================")
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
 
-for ch in channels:
+    def on_click(self, event: "matplotlib.backend_bases.MouseEvent") -> None:
+        """
+        Handles button_press_event.
+        - Double-click  → clear all permanent markers.
+        - Single left   → place a new permanent marker.
+        """
+        if event.inaxes not in self.axes_list:
+            return                          # click outside any subplot
 
-    print(
-        f"{ch}: "
-        f"{references[ch]:.3f} dB"
-    )
+        if event.dblclick:
+            self._clear_all_markers()
+            event.canvas.draw_idle()
+            return
 
-# ==========================================================
-# ATTENUATION CALCULATION
-# ==========================================================
+        if event.button == 1:               # left single-click
+            ax_index = self.axes_list.index(event.inaxes)
+            self._place_marker(event, ax_index)
+            event.canvas.draw_idle()
 
-for ch in channels:
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-    att_col = (
-        ch.replace(
-            "Amp_",
-            "Att_"
+    def _place_marker(
+        self,
+        event: "matplotlib.backend_bases.MouseEvent",
+        ax_index: int,
+    ) -> None:
+        """
+        Snaps the click position to the nearest sample by time,
+        then draws the permanent marker annotation on the correct axis.
+        """
+        ax      = self.axes_list[ax_index]
+        att_col = self.att_cols[ax_index]
+
+        # Convert click X (Matplotlib date float) to a timezone-naive datetime
+        click_time = mdates.num2date(event.xdata).replace(tzinfo=None)
+
+        # Find the nearest sample using the pre-computed numpy array.
+        # abs() on a timedelta array is fast and raises no FutureWarning.
+        deltas      = [abs((t - click_time).total_seconds()) for t in self._time_values]
+        nearest_idx = int(pd.Series(deltas).idxmin())
+
+        snap_time = self.df["Time"].iloc[nearest_idx]
+        snap_att  = self.df[att_col].iloc[nearest_idx]
+
+        # Choose the next circled-number label (cycle if > 20 markers)
+        label = CIRCLED_DIGITS[self._count % len(CIRCLED_DIGITS)]
+        self._count += 1
+
+        # --- Red dot at the snapped position ---
+        dot = ax.scatter(
+            snap_time,
+            snap_att,
+            color="red",
+            s=40,               # dot size in points²
+            zorder=6,           # render above the line
         )
-    )
 
-    df[att_col] = (
-        references[ch]
-        - df[ch]
-    )
-
-    df[att_col] = (
-        df[att_col]
-        .clip(lower=0)
-    )
-# ==========================================================
-# CREATE PER-MINUTE ATTENUATION DATA
-# ==========================================================
-
-minute_df = pd.DataFrame()
-
-# Convert HH:MM:SS -> HH:MM
-
-minute_df['Minute'] = (
-    df['Time']
-    .dt.strftime('%H:%M')
-)
-
-minute_df['Att_Channel-1'] = df['Att_Channel-1']
-minute_df['Att_Channel-2'] = df['Att_Channel-2']
-minute_df['Att_Channel-3'] = df['Att_Channel-3']
-minute_df['Att_Channel-4'] = df['Att_Channel-4']
-
-# ==========================================================
-# AVERAGE ATTENUATION FOR EACH MINUTE
-# ==========================================================
-
-minute_df = (
-    minute_df
-    .groupby('Minute')
-    .mean()
-    .reset_index()
-)
-
-# ==========================================================
-# SAVE FILE
-# ==========================================================
-
-output_file = (
-    Path(file_path).parent
-    /
-    f"Attenuation_{Path(file_path).name}"
-)
-
-minute_df.to_csv(
-    output_file,
-    sep='\t',
-    index=False,
-    float_format='%.4f'
-)
-
-print("\n========================================")
-print("Per-Minute Attenuation File Saved")
-print("========================================")
-print(output_file)
-
-# ==========================================================
-# MAXIMUM ATTENUATION
-# ==========================================================
-
-print("\n========================================")
-print("Maximum Attenuation")
-print("========================================")
-
-for i in range(1, 5):
-
-    att_col = f"Att_Channel-{i}"
-
-    print(
-        f"CH{i}: "
-        f"{df[att_col].max():.2f} dB"
-    )
-
-# ==========================================================
-# MATLAB STYLE 2x2 SUBPLOTS
-# ==========================================================
-
-fig, ax = plt.subplots(
-    2,
-    2,
-    figsize=(15, 8)
-)
-
-# ==========================================================
-# CH1
-# ==========================================================
-
-ax[0, 0].plot(
-    df['Time'],
-    df['Att_Channel-1']
-)
-
-ax[0, 0].set_title(
-    'CH1'
-)
-
-ax[0, 0].set_ylabel(
-    'Attenuation (dB)'
-)
-
-ax[0, 0].grid(True)
-
-# ==========================================================
-# CH2
-# ==========================================================
-
-ax[0, 1].plot(
-    df['Time'],
-    df['Att_Channel-2']
-)
-
-ax[0, 1].set_title(
-    'CH2'
-)
-
-ax[0, 1].set_ylabel(
-    'Attenuation (dB)'
-)
-
-ax[0, 1].grid(True)
-
-# ==========================================================
-# CH3
-# ==========================================================
-
-ax[1, 0].plot(
-    df['Time'],
-    df['Att_Channel-3']
-)
-
-ax[1, 0].set_title(
-    'CH3'
-)
-
-ax[1, 0].set_xlabel(
-    'Time (IST)'
-)
-
-ax[1, 0].set_ylabel(
-    'Attenuation (dB)'
-)
-
-ax[1, 0].grid(True)
-
-# ==========================================================
-# CH4
-# ==========================================================
-
-ax[1, 1].plot(
-    df['Time'],
-    df['Att_Channel-4']
-)
-
-ax[1, 1].set_title(
-    'CH4'
-)
-
-ax[1, 1].set_xlabel(
-    'Time (IST)'
-)
-
-ax[1, 1].set_ylabel(
-    'Attenuation (dB)'
-)
-
-ax[1, 1].grid(True)
-
-# ==========================================================
-# FORMAT X AXIS AS HOURS
-# ==========================================================
-
-for axes in ax.flat:
-
-    axes.xaxis.set_major_formatter(
-        mdates.DateFormatter('%H:%M')
-    )
-
-    axes.xaxis.set_major_locator(
-        mdates.HourLocator(
-            byhour=[0, 3, 6, 9, 12, 15, 18, 21]
+        # --- Compact annotation with arrow ---
+        annot = ax.annotate(
+            f"{label}\n{snap_time.strftime('%H:%M')}\n{snap_att:.2f} dB",
+            xy=(snap_time, snap_att),                   # arrow tip (the dot)
+            xytext=(16, 16),                             # offset in points
+            textcoords="offset points",
+            fontsize=7.5,
+            color="darkred",
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="lightyellow",
+                edgecolor="red",
+                linewidth=0.8,
+                alpha=0.90,
+            ),
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color="red",
+                lw=0.9,
+            ),
+            zorder=7,
         )
+
+        # Add a subtle text shadow so the label is legible on any background
+        annot.set_path_effects([
+            pe.withStroke(linewidth=2, foreground="white")
+        ])
+
+        # Keep references so we can remove them on double-click
+        self._markers.extend([dot, annot])
+
+    def _clear_all_markers(self) -> None:
+        """Removes every permanent marker artist from all axes."""
+        for artist in self._markers:
+            try:
+                artist.remove()
+            except ValueError:
+                pass    # already removed — safe to ignore
+        self._markers.clear()
+        # Note: _count is intentionally NOT reset so numbering stays unique
+        # within a session. Set self._count = 0 here to restart numbering.
+
+
+# ==============================================================================
+# HOVER TOOLTIP (mplcursors)
+# ==============================================================================
+
+def setup_hover_cursor(line_artists: list, channel_labels: list) -> None:
+    """
+    Attaches mplcursors to the plotted line objects to display a temporary
+    tooltip while the pointer hovers over a data point.
+
+    The tooltip shows:
+        Channel name
+        Time  (HH:MM:SS)
+        Attenuation (dB)
+
+    The tooltip is removed automatically when the cursor moves away
+    (hover=True + transient=True achieve this).
+    """
+    cursor = mplcursors.cursor(
+        line_artists,
+        hover=mplcursors.HoverMode.Transient,   # disappears on mouse-leave
     )
 
-    axes.tick_params(
-        axis='x',
-        rotation=45
+    # Map each line artist → channel label for the annotation text
+    artist_to_label = dict(zip(line_artists, channel_labels))
+
+    @cursor.connect("add")
+    def on_add(sel):
+        x_num = sel.target[0]
+        y_val = sel.target[1]
+        t_str = mdates.num2date(x_num).strftime("%H:%M:%S")
+        ch_label = artist_to_label.get(sel.artist, "Unknown")
+
+        sel.annotation.set_text(
+            f"{ch_label}\n"
+            f"Time : {t_str}\n"
+            f"Att  : {y_val:.2f} dB"
+        )
+        sel.annotation.get_bbox_patch().set(
+            facecolor="lightyellow",
+            edgecolor="steelblue",
+            alpha=0.90,
+        )
+        sel.annotation.set_fontsize(8)
+
+
+# ==============================================================================
+# SUBPLOT FORMATTING
+# ==============================================================================
+
+def format_axes(ax, title: str, show_xlabel: bool) -> None:
+    """
+    Applies consistent formatting to a single subplot axis:
+      - Title, axis labels, grid
+      - X-axis: HH:MM with 3-hour major ticks, 45° rotation
+      - Y-axis: fixed 0–25 dB range
+    """
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=4)
+    ax.set_ylabel("Attenuation (dB)", fontsize=9)
+    ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
+
+    if show_xlabel:
+        ax.set_xlabel("Time (IST)", fontsize=9)
+
+    # X-axis tick format and spacing
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax.xaxis.set_major_locator(mdates.HourLocator(byhour=HOUR_TICKS))
+    ax.tick_params(axis="x", rotation=45, labelsize=8)
+    ax.tick_params(axis="y", labelsize=8)
+
+
+# ==============================================================================
+# MAIN PLOTTING FUNCTION
+# ==============================================================================
+
+def plot_attenuation(df: pd.DataFrame, date_str: str) -> None:
+    """
+    Builds the 2×2 subplot figure, plots all four attenuation channels,
+    sets up the hover tooltip, and connects the permanent-marker event handler.
+
+    Layout
+    ------
+      [CH1]  [CH2]
+      [CH3]  [CH4]
+
+    The function blocks at plt.show() until the window is closed.
+    """
+
+    att_cols     = [ch.replace("Amp_", "Att_") for ch in CHANNELS]
+    chan_labels  = [f"CH{i}" for i in range(1, 5)]
+
+    # --- Figure & axes -------------------------------------------------------
+    fig, ax_grid = plt.subplots(
+        2, 2,
+        figsize=(15, 8),
+        sharex=False,           # keep axes independent so zoom is per-panel
+    )
+    fig.patch.set_facecolor("#F7F7F7")
+
+    # Flatten the 2×2 grid to a list: [CH1, CH2, CH3, CH4]
+    axes_flat = [ax_grid[0, 0], ax_grid[0, 1], ax_grid[1, 0], ax_grid[1, 1]]
+
+    # --- Plot each channel in a loop (replaces the original CH1…CH4 blocks) --
+    line_artists = []
+
+    for idx, (ax, att_col, label) in enumerate(
+        zip(axes_flat, att_cols, chan_labels)
+    ):
+        show_xlabel = idx >= 2          # only bottom row gets X-axis label
+
+        # Downsample for rendering performance while preserving extremes.
+        # Uses every Nth sample so the interactive cursor still resolves to
+        # the original data (MarkerManager always queries the full df).
+        line, = ax.plot(
+            df["Time"],
+            df[att_col],
+            linewidth=0.7,
+            color=f"C{idx}",            # Matplotlib's default colour cycle
+            label=label,
+        )
+        line_artists.append(line)
+
+        format_axes(ax, label, show_xlabel)
+
+    # --- Overall figure title ------------------------------------------------
+    # y=0.98 keeps the title fully inside the figure canvas so it is never
+    # clipped by the window frame.  tight_layout's rect parameter reserves
+    # the top 4 % of the figure for the title so subplots don't overlap it.
+    fig.suptitle(
+        f"DRSP Rain Attenuation  —  {date_str}",
+        fontsize=14,
+        fontweight="bold",
+        y=0.98,
     )
 
-# ==========================================================
-# FIXED Y-AXIS RANGE FOR ALL ATTENUATION PLOTS
-# ==========================================================
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
 
-for axes in ax.flat:
+    # --- Hover tooltip (mplcursors — temporary) ------------------------------
+    setup_hover_cursor(line_artists, chan_labels)
 
-    axes.set_ylim(
-        0,
-        25
-    )
-# ==========================================================
-# OVERALL TITLE
-# ==========================================================
+    # --- Permanent markers (native Matplotlib events) ------------------------
+    marker_mgr = MarkerManager(axes_flat, df, att_cols)
 
-plt.suptitle(
-    f'DRSP Rain Attenuation ({date_str})',
-    fontsize=16
-)
-
-plt.tight_layout()
-
-# ==========================================================
-# DATA CURSOR (MATLAB-LIKE)
-# ==========================================================
-
-cursor = mplcursors.cursor(
-    hover=True
-)
-
-@cursor.connect("add")
-def on_add(sel):
-
-    x = mdates.num2date(sel.target[0])
-
-    y = sel.target[1]
-
-    sel.annotation.set_text(
-        f"Time: {x.strftime('%H:%M:%S')}\n"
-        f"Att: {y:.2f} dB"
+    fig.canvas.mpl_connect(
+        "button_press_event",
+        marker_mgr.on_click,
     )
 
-plt.show()
+    # --- Instructions in the figure window title bar -------------------------
+    fig.canvas.manager.set_window_title(
+        "DRSP Attenuation  |  Left-click: place marker   Double-click: clear all"
+    )
+
+    # --- Render ---------------------------------------------------------------
+    plt.show()
+
+
+# ==============================================================================
+# ENTRY POINT
+# ==============================================================================
+
+def main() -> None:
+    """
+    Orchestrates the full pipeline:
+      1. Load raw data.
+      2. Compute references and attenuation.
+      3. Report statistics.
+      4. Export per-minute file.
+      5. Launch interactive plot.
+    """
+
+    # ── Date from filename ────────────────────────────────────────────────────
+    date_str = extract_date_from_filename(FILE_PATH)
+    print(f"\nDate extracted from filename : {date_str}")
+
+    # ── Data loading ─────────────────────────────────────────────────────────
+    df = load_data(FILE_PATH)
+    print(f"Rows loaded (after NaN drop) : {len(df):,}")
+
+    # ── Reference levels ─────────────────────────────────────────────────────
+    references = compute_references(df)
+
+    # ── Attenuation columns ──────────────────────────────────────────────────
+    df = compute_attenuation(df, references)
+
+    # ── Per-minute export ────────────────────────────────────────────────────
+    save_per_minute_file(df, FILE_PATH)
+
+    # ── Max attenuation report ───────────────────────────────────────────────
+    report_max_attenuation(df)
+
+    # ── Interactive plot ─────────────────────────────────────────────────────
+    plot_attenuation(df, date_str)
+
+
+if __name__ == "__main__":
+    main()
